@@ -1,0 +1,48 @@
+[package]
+name = "zenless-torrent"
+version = "0.1.0"
+edition = "2024"
+description = "Zenless Torrent - a calm, fast BitTorrent client"
+license = "MIT"
+repository = "https://github.com/zenless-inc/zenless-torrent-client"
+homepage = "https://zenless-suite.vercel.app"
+
+[dependencies]
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow"] }
+egui_extras = { version = "0.36" }
+egui-phosphor = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+rfd = "0.17"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+tiny_http = "0.12"
+anyhow = "1"
+base64 = "0.22"
+url = "2"
+percent-encoding = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "env-filter"] }
+
+# BitTorrent engine. The default features pull in aws-lc (C code) through
+# reqwest's default TLS, so they are disabled and restored in a C-free way:
+#  * reqwest below enables `native-tls` (SChannel on Windows) — cargo feature
+#    unification makes librqbit's own reqwest client use it too;
+#  * librqbit-core / librqbit-sha1-wrapper get the pure-Rust SHA-1 backend.
+librqbit = { version = "9", default-features = false }
+librqbit-core = { version = "9.0.1", default-features = false, features = ["sha1-crypto-hash"] }
+librqbit-sha1-wrapper = { version = "9.0.1", default-features = false, features = ["sha1-crypto-hash"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "stream", "http2", "charset", "system-proxy"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+
+[build-dependencies]
+embed-resource = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+panic = "abort"
