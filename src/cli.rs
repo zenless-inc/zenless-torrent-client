@@ -1,4 +1,7 @@
 //! Command-line parsing: `zenless-torrent.exe [--minimized] [magnet:?… | file.torrent …]`.
+//!
+//! After a self-update the previous version starts the new one with
+//! `--updated-from <old version>` (see `shared::updater`).
 
 use std::path::PathBuf;
 
@@ -12,6 +15,8 @@ pub enum CliItem {
 pub struct CliArgs {
     pub minimized: bool,
     pub items: Vec<CliItem>,
+    /// `--updated-from <version>`: started by the previous version after an update.
+    pub updated_from: Option<String>,
 }
 
 /// Parses the arguments *after* the program name. Unknown flags are ignored so
@@ -22,7 +27,8 @@ where
     S: AsRef<str>,
 {
     let mut out = CliArgs::default();
-    for arg in args {
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
         let arg = arg.as_ref().trim().trim_matches('"');
         if arg.is_empty() {
             continue;
@@ -30,6 +36,12 @@ where
         let lower = arg.to_ascii_lowercase();
         if matches!(lower.as_str(), "--minimized" | "-m" | "/minimized" | "--hidden") {
             out.minimized = true;
+        } else if lower == "--updated-from" {
+            // Consumes the version, so it is never mistaken for a .torrent path.
+            out.updated_from = args
+                .next()
+                .map(|v| v.as_ref().trim().trim_matches('"').to_owned())
+                .filter(|v| !v.is_empty());
         } else if lower.starts_with("magnet:") {
             out.items.push(CliItem::Magnet(arg.to_owned()));
         } else if arg.len() == 40 && arg.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -80,6 +92,17 @@ mod tests {
                 "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c".into()
             )]
         );
+    }
+
+    #[test]
+    fn updated_from_takes_the_version() {
+        let a = parse(["--updated-from", "0.2.0", "--minimized"]);
+        assert_eq!(a.updated_from.as_deref(), Some("0.2.0"));
+        assert!(a.minimized);
+        assert!(a.items.is_empty(), "the version is not a .torrent path");
+        let a = parse(["--updated-from"]);
+        assert_eq!(a.updated_from, None);
+        assert_eq!(parse(["x.torrent"]).updated_from, None);
     }
 
     #[test]

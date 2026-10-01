@@ -3,9 +3,12 @@
 //!
 //! `ZENLESS_DEMO_VIEW` picks an extra state to show: `add` (Add dialog),
 //! `magnet`, `settings`, `settings-network`, `settings-browser`,
-//! `settings-appearance`, `about`, `files`, `peers`, `trackers`, `speed`,
-//! `remove`, `empty` or `toast`. `ZENLESS_DEMO_THEME=<built-in theme name>`
-//! applies a theme in memory only (the shared appearance.json is untouched).
+//! `settings-appearance`, `about` (or `settings-about`), `files`, `peers`,
+//! `trackers`, `speed`, `remove`, `empty` or `toast`; a made-up update:
+//! `update-available`, `update-downloading`, `update-ready`, `update-failed`
+//! (banner) or `settings-updates` (Settings › About with an update ready).
+//! `ZENLESS_DEMO_THEME=<built-in theme name>` applies a theme in memory only
+//! (the shared appearance.json is untouched).
 
 use crate::model::{
     EngineStatus, FileEntry, PeerView, ResolvedTorrent, Snapshot, Status, TorrentView,

@@ -4,8 +4,12 @@ use crate::model::Column;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// `%APPDATA%\Zenless\Torrent`.
+/// `%APPDATA%\Zenless\Torrent` (`ZENLESS_TORRENT_DATA_DIR` overrides it, for
+/// tests that must not touch the real data).
 pub fn data_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("ZENLESS_TORRENT_DATA_DIR").filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir);
+    }
     crate::shared::theme::zenless_config_dir().join("Torrent")
 }
 

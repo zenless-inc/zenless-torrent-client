@@ -357,6 +357,8 @@ struct Engine {
     peer_prev_at: Instant,
     generation: u64,
     http: reqwest::Client,
+    /// Serializes the real torrent adds, see [`AddLock`].
+    add_lock: AddLock,
 }
 
 impl Engine {
@@ -405,6 +407,7 @@ impl Engine {
             peer_prev_at: Instant::now(),
             generation: 0,
             http,
+            add_lock: AddLock::default(),
         }
     }
 
@@ -681,8 +684,9 @@ impl Engine {
         let events = self.events.clone();
         let internal = self.internal_tx.clone();
         let ctx = self.ctx.clone();
+        let lock = self.add_lock.clone();
         tokio::spawn(async move {
-            match add_resolved(&session, params).await {
+            match add_resolved(&session, &lock, params).await {
                 Ok((name, fresh)) => {
                     let _ = events.send(if fresh {
                         EngineEvent::Added { name }
@@ -778,6 +782,7 @@ impl Engine {
         let events = self.events.clone();
         let internal = self.internal_tx.clone();
         let ctx = self.ctx.clone();
+        let lock = self.add_lock.clone();
         let task = tokio::spawn(async move {
             let outcome = match tokio::time::timeout(
                 BACKGROUND_RESOLVE_TIMEOUT,
@@ -800,9 +805,13 @@ impl Engine {
                         paused,
                         initial_peers: r.seen_peers,
                     };
-                    match add_resolved(&session, params).await {
-                        Ok((name, _)) => {
-                            let _ = events.send(EngineEvent::Added { name });
+                    match add_resolved(&session, &lock, params).await {
+                        Ok((name, fresh)) => {
+                            let _ = events.send(if fresh {
+                                EngineEvent::Added { name }
+                            } else {
+                                EngineEvent::Info(format!("\"{name}\" is already in your list."))
+                            });
                             Ok(())
                         }
                         Err(e) => Err(clean_error(&format!("{e:#}"))),
@@ -879,13 +888,14 @@ impl Engine {
             let info_hash = h.info_hash();
             drop(h);
             let session = session.clone();
+            let lock = self.add_lock.clone();
             tokio::spawn(async move {
                 let result = async {
                     session
                         .delete(TorrentIdOrHash::Hash(info_hash), false)
                         .await
                         .context("could not detach torrent")?;
-                    add_resolved(&session, params).await
+                    add_resolved(&session, &lock, params).await
                 }
                 .await;
                 if let Err(e) = result {
@@ -1304,22 +1314,63 @@ async fn resolve(
     }
 }
 
-/// Adds resolved torrent bytes. Returns the name and whether it was new.
-async fn add_resolved(session: &Arc<Session>, p: AddParams) -> anyhow::Result<(String, bool)> {
-    let opts = AddTorrentOptions {
-        paused: p.paused,
-        only_files: p.only_files,
-        overwrite: true,
-        output_folder: Some(p.output_folder.to_string_lossy().into_owned()),
-        initial_peers: (!p.initial_peers.is_empty()).then_some(p.initial_peers),
-        ..Default::default()
-    };
+/// Serializes the real (not list-only) `Session::add_torrent` calls.
+///
+/// librqbit 9.0.1's JSON persistence picks a new torrent's id as "highest
+/// stored id + 1", and the id is only stored once the add has finished. Two
+/// adds running at the same time therefore get the *same* id, and the second
+/// one is answered `AlreadyManaged` with the first torrent's handle: it would
+/// silently disappear. List-only adds (metadata lookups) take no id and don't
+/// need the lock.
+pub type AddLock = Arc<tokio::sync::Mutex<()>>;
+
+/// Pause before retrying an add that collided with one made outside the lock.
+const ADD_RETRY_DELAY: Duration = Duration::from_millis(300);
+
+/// Adds resolved torrent bytes (one add at a time, see [`AddLock`]). Returns
+/// the name and whether it was new; `false` means this very torrent (same
+/// info hash) was already in the session. An `AlreadyManaged` answer for a
+/// *different* torrent is retried once and then reported as an error, so a
+/// torrent is never dropped silently.
+async fn add_resolved(
+    session: &Arc<Session>,
+    lock: &tokio::sync::Mutex<()>,
+    p: AddParams,
+) -> anyhow::Result<(String, bool)> {
+    let expected = librqbit::torrent_from_bytes(&p.torrent_bytes)
+        .context("invalid .torrent data")?
+        .info_hash;
     let bytes = Arc::try_unwrap(p.torrent_bytes).unwrap_or_else(|a| a.as_ref().clone());
-    match session.add_torrent(AddTorrent::from_bytes(bytes), Some(opts)).await? {
-        AddTorrentResponse::Added(_, h) => Ok((h.name().unwrap_or(p.name), true)),
-        AddTorrentResponse::AlreadyManaged(_, h) => Ok((h.name().unwrap_or(p.name), false)),
-        AddTorrentResponse::ListOnly(_) => bail!("unexpected list-only response"),
+    let _guard = lock.lock().await;
+    for attempt in 1..=2 {
+        let opts = AddTorrentOptions {
+            paused: p.paused,
+            only_files: p.only_files.clone(),
+            overwrite: true,
+            output_folder: Some(p.output_folder.to_string_lossy().into_owned()),
+            initial_peers: (!p.initial_peers.is_empty()).then(|| p.initial_peers.clone()),
+            ..Default::default()
+        };
+        match session.add_torrent(AddTorrent::from_bytes(bytes.clone()), Some(opts)).await? {
+            AddTorrentResponse::Added(_, h) => return Ok((h.name().unwrap_or(p.name), true)),
+            AddTorrentResponse::AlreadyManaged(_, h) if h.info_hash() == expected => {
+                return Ok((h.name().unwrap_or(p.name), false));
+            }
+            AddTorrentResponse::AlreadyManaged(id, h) => {
+                tracing::warn!(
+                    "adding {} ({}) collided with torrent #{id} ({}), attempt {attempt}",
+                    p.name,
+                    expected.as_string(),
+                    h.info_hash().as_string()
+                );
+                if attempt == 1 {
+                    tokio::time::sleep(ADD_RETRY_DELAY).await;
+                }
+            }
+            AddTorrentResponse::ListOnly(_) => bail!("unexpected list-only response"),
+        }
     }
+    bail!("librqbit gave \"{}\" the id of another torrent; please add it again", p.name)
 }
 
 #[cfg(test)]
@@ -1344,5 +1395,118 @@ mod tests {
             output_folder_for(base, "Album: Live", 3),
             base.join("Album_ Live")
         );
+    }
+
+    // -- adding torrents concurrently (librqbit id race) -------------------------
+
+    /// A single-file .torrent (bencoded, keys sorted). The data is never on
+    /// disk, so the torrents just wait for peers.
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        const PIECE: usize = 16 * 1024;
+        let len: usize = 40_000;
+        let pieces = len.div_ceil(PIECE) * 20;
+        let mut out = format!(
+            "d4:infod6:lengthi{len}e4:name{}:{name}12:piece lengthi{PIECE}e6:pieces{pieces}:",
+            name.len()
+        )
+        .into_bytes();
+        out.extend(std::iter::repeat_n(name.len() as u8, pieces));
+        out.extend_from_slice(b"ee");
+        out
+    }
+
+    fn hash_of(bytes: &[u8]) -> String {
+        librqbit::torrent_from_bytes(bytes).unwrap().info_hash.as_string()
+    }
+
+    /// A session like the app's (JSON persistence), but without any network.
+    async fn offline_session(name: &str) -> (Arc<Session>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("zenless-torrent-engine-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("session")).unwrap();
+        let opts = SessionOptions {
+            dht: None,
+            listen: None,
+            disable_trackers: true,
+            disable_local_service_discovery: true,
+            persistence: Some(SessionPersistenceConfig::Json {
+                folder: Some(dir.join("session")),
+            }),
+            ..Default::default()
+        };
+        let session = Session::new_with_opts(dir.join("downloads"), opts).await.unwrap();
+        (session, dir)
+    }
+
+    fn params(name: &str, dir: &Path) -> AddParams {
+        AddParams {
+            torrent_bytes: Arc::new(torrent_bytes(name)),
+            name: name.to_owned(),
+            output_folder: dir.join("downloads"),
+            only_files: None,
+            paused: false,
+            initial_peers: Vec::new(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_adds_keep_every_torrent() {
+        let (session, dir) = offline_session("concurrent").await;
+        let lock = AddLock::default();
+        let names = ["alpha.bin", "beta.bin", "gamma.bin", "delta.bin"];
+        let tasks: Vec<_> = names
+            .iter()
+            .map(|n| {
+                let (session, lock, p) = (session.clone(), lock.clone(), params(n, &dir));
+                tokio::spawn(async move { add_resolved(&session, &lock, p).await })
+            })
+            .collect();
+        for (task, name) in tasks.into_iter().zip(names) {
+            let (added, fresh) = task.await.unwrap().unwrap();
+            assert_eq!(added, name);
+            assert!(fresh, "{name} must be a new torrent, not 'already managed'");
+        }
+        for name in names {
+            assert!(find(&session, &hash_of(&torrent_bytes(name))).is_some(), "{name} is in the session");
+        }
+        assert_eq!(session.with_torrents(|it| it.count()), names.len());
+
+        // A genuine duplicate keeps the "already in your list" answer.
+        let (_, fresh) = add_resolved(&session, &lock, params("beta.bin", &dir)).await.unwrap();
+        assert!(!fresh);
+        assert_eq!(session.with_torrents(|it| it.count()), names.len());
+        session.stop().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn add_colliding_with_one_outside_the_lock_is_retried() {
+        let (session, dir) = offline_session("collision").await;
+        let lock = AddLock::default();
+        // Not through `add_resolved`, so not serialized. Ours starts as soon
+        // as this one is registered, usually before its id is persisted: ours
+        // then gets the same id, is answered `AlreadyManaged` with this
+        // torrent and must be retried instead of dropped.
+        let outside = {
+            let session = session.clone();
+            let folder = dir.join("downloads").to_string_lossy().into_owned();
+            tokio::spawn(async move {
+                let opts = AddTorrentOptions { output_folder: Some(folder), ..Default::default() };
+                session.add_torrent(AddTorrent::from_bytes(torrent_bytes("outside.bin")), Some(opts)).await
+            })
+        };
+        let outside_hash = hash_of(&torrent_bytes("outside.bin"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while find(&session, &outside_hash).is_none() && Instant::now() < deadline {
+            tokio::task::yield_now().await;
+        }
+        let ours = add_resolved(&session, &lock, params("inside.bin", &dir)).await;
+        assert!(matches!(outside.await.unwrap().unwrap(), AddTorrentResponse::Added(..)));
+        assert_eq!(ours.unwrap(), ("inside.bin".to_owned(), true));
+        for name in ["outside.bin", "inside.bin"] {
+            assert!(find(&session, &hash_of(&torrent_bytes(name))).is_some(), "{name} is in the session");
+        }
+        session.stop().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

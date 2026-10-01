@@ -1,6 +1,6 @@
 [package]
 name = "zenless-torrent"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Zenless Torrent - a calm, fast BitTorrent client"
 license = "MIT"
@@ -23,6 +23,8 @@ url = "2"
 percent-encoding = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "env-filter"] }
+# Self-updater (src/shared/updater.rs): SHA-256 of the downloaded release.
+sha2 = "0.10"
 
 # BitTorrent engine. The default features pull in aws-lc (C code) through
 # reqwest's default TLS, so they are disabled and restored in a C-free way:
@@ -32,7 +34,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 librqbit = { version = "9", default-features = false }
 librqbit-core = { version = "9.0.1", default-features = false, features = ["sha1-crypto-hash"] }
 librqbit-sha1-wrapper = { version = "9.0.1", default-features = false, features = ["sha1-crypto-hash"] }
-reqwest = { version = "0.13", default-features = false, features = ["native-tls", "stream", "http2", "charset", "system-proxy"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "stream", "blocking", "http2", "charset", "system-proxy"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"

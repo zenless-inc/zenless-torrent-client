@@ -24,6 +24,16 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const CLIENT_NAME: &str = concat!("zenless-torrent/", env!("CARGO_PKG_VERSION"));
 const MAX_BODY: usize = 8 * 1024 * 1024;
 
+/// The port to use: [`PORT`], or `ZENLESS_TORRENT_PORT` (tests that run next
+/// to a real instance; browser extensions only know 6813).
+pub fn port() -> u16 {
+    std::env::var("ZENLESS_TORRENT_PORT")
+        .ok()
+        .and_then(|p| p.trim().parse().ok())
+        .filter(|&p: &u16| p != 0)
+        .unwrap_or(PORT)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AddMode {
     /// Show the "Add torrent" dialog and bring the window to the front.
@@ -249,20 +259,21 @@ pub fn start(snapshot: SharedSnapshot, tx: Sender<ApiEvent>, egui: egui::Context
         status: status.clone(),
         egui,
     };
+    let port = port();
     let spawned = std::thread::Builder::new()
         .name("zenless-api".into())
         .spawn(move || {
-            let server = match tiny_http::Server::http(("127.0.0.1", PORT)) {
+            let server = match tiny_http::Server::http(("127.0.0.1", port)) {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!("local API unavailable: {e}");
-                    lock(&ctx.status).error = Some(format!("Port {PORT} is unavailable: {e}"));
+                    lock(&ctx.status).error = Some(format!("Port {port} is unavailable: {e}"));
                     ctx.egui.request_repaint();
                     return;
                 }
             };
             lock(&ctx.status).listening = true;
-            tracing::info!("local API listening on 127.0.0.1:{PORT}");
+            tracing::info!("local API listening on 127.0.0.1:{port}");
             for request in server.incoming_requests() {
                 handle(request, &ctx);
             }
@@ -465,7 +476,7 @@ pub fn status_json(snap: &crate::model::Snapshot) -> serde_json::Value {
 // ---------------------------------------------------------------------------
 
 pub mod client {
-    use super::{APP_ID, CLIENT_NAME, PORT};
+    use super::{APP_ID, CLIENT_NAME, port};
     use crate::cli::CliItem;
     use serde_json::json;
     use std::{
@@ -476,13 +487,14 @@ pub mod client {
 
     /// Minimal blocking HTTP/1.1 request to our own port. Returns `(status, body)`.
     pub fn call(method: &str, path: &str, body: Option<&str>, timeout: Duration) -> std::io::Result<(u16, String)> {
-        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, PORT));
+        let port = port();
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
         let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
         stream.set_read_timeout(Some(timeout.max(Duration::from_secs(2))))?;
         stream.set_write_timeout(Some(timeout.max(Duration::from_secs(2))))?;
         let body = body.unwrap_or("");
         let request = format!(
-            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\nX-Zenless-Client: {CLIENT_NAME}\r\n\
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Zenless-Client: {CLIENT_NAME}\r\n\
              Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );

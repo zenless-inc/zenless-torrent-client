@@ -14,6 +14,7 @@ use crate::cli::{CliArgs, CliItem};
 use crate::engine::{AddParams, Command, EngineConfig, EngineHandle};
 use crate::model::{AddSource, EngineEvent, Filter, Snapshot, TorrentView};
 use crate::settings::Settings;
+use crate::shared::updater::{ReleaseInfo, Status as UpdateStatus, UpdateAction, Updater, UpdaterConfig};
 use crate::shared::{kit, theme::ThemeManager};
 use add_dialog::{AddDialog, AddOutcome};
 use eframe::egui::{self, RichText, ViewportCommand};
@@ -107,7 +108,30 @@ pub struct App {
     raise_frames: u8,
     autostart_on: bool,
     handlers_on: bool,
+
+    /// Self-updater: banner, Settings › About › Updates, install on exit.
+    updater: Updater,
+    /// `ZENLESS_UPDATE_TEST_RESTART=1`: restart as soon as an update is
+    /// ready, exactly like "Restart now" (end-to-end tests).
+    restart_when_ready: bool,
 }
+
+/// The updater settings for this app.
+fn updater_config() -> UpdaterConfig {
+    UpdaterConfig {
+        app_id: api::APP_ID,
+        app_name: api::APP_NAME,
+        repo: GITHUB_REPO,
+        asset: RELEASE_ASSET,
+        current_version: api::VERSION,
+        data_dir: crate::settings::data_dir(),
+    }
+}
+
+/// `owner/name` of the GitHub repository whose releases the updater follows.
+const GITHUB_REPO: &str = "zenless-inc/zenless-torrent-client";
+/// The release asset that is this app.
+const RELEASE_ASSET: &str = "zenless-torrent.exe";
 
 pub fn engine_config(s: &Settings) -> EngineConfig {
     EngineConfig {
@@ -146,6 +170,12 @@ impl App {
             (engine, Some(rx), Some(status))
         };
 
+        // Updates: checked in the background (never in demo mode).
+        let mut updater = Updater::new(updater_config());
+        if !demo {
+            updater.start(&ctx);
+        }
+
         let mut app = Self {
             applied_network: settings.network_key(),
             snap: engine.snapshot(),
@@ -182,7 +212,18 @@ impl App {
             raise_frames: 0,
             autostart_on: false,
             handlers_on: false,
+            updater,
+            restart_when_ready: !demo && std::env::var("ZENLESS_UPDATE_TEST_RESTART").is_ok_and(|v| v == "1"),
         };
+        if let Some(from) = &args.updated_from {
+            let notes = app.updater.config().release_page(api::VERSION);
+            app.toasts.push(Toast {
+                text: format!("Updated to v{} (from {from})", api::VERSION),
+                kind: ToastKind::Success,
+                born: Instant::now(),
+                link: Some(("What's new".into(), notes)),
+            });
+        }
         for item in args.items {
             let source = match item {
                 CliItem::Magnet(m) => AddSource::Magnet(m),
@@ -252,7 +293,7 @@ impl App {
             "settings-network" => self.open_settings(SettingsTab::Network),
             "settings-browser" => self.open_settings(SettingsTab::Browser),
             "settings-appearance" => self.open_settings(SettingsTab::Appearance),
-            "about" => self.open_settings(SettingsTab::About),
+            "about" | "settings-about" | "settings-updates" => self.open_settings(SettingsTab::About),
             "files" => self.details_tab = DetailsTab::Files,
             "peers" => self.details_tab = DetailsTab::Peers,
             "trackers" => self.details_tab = DetailsTab::Trackers,
@@ -274,6 +315,60 @@ impl App {
             }
             "toast" => self.toast("Download complete: debian-12.7.0-amd64-netinst.iso", ToastKind::Success),
             _ => {}
+        }
+        self.demo_update_status(&crate::demo::view());
+    }
+
+    /// Demo mode: `ZENLESS_DEMO_VIEW=update-available|update-downloading|
+    /// update-ready|update-failed|settings-updates` shows a made-up update.
+    fn demo_update_status(&mut self, view: &str) {
+        let release = ReleaseInfo {
+            version: "0.3.0".into(),
+            tag: "v0.3.0".into(),
+            notes: "## What's new\n* Sequential download for video files\n* Per-torrent speed limits\n* Faster start \
+                    with hundreds of torrents"
+                .into(),
+            html_url: self.updater.config().release_page("0.3.0"),
+            asset_url: format!("https://github.com/{GITHUB_REPO}/releases/download/v0.3.0/{RELEASE_ASSET}"),
+            asset_size: 14_327_808,
+            sha256: Some("0".repeat(64)),
+            published_at: "2026-10-01T12:00:00Z".into(),
+        };
+        let path = crate::settings::data_dir().join("updates").join("zenless-torrent-0.3.0.exe");
+        let status = match view {
+            "update-available" => UpdateStatus::Available(release),
+            "update-downloading" => UpdateStatus::Downloading { release, received: 9_175_040, total: 14_327_808 },
+            "update-ready" | "settings-updates" => UpdateStatus::Ready { release, path },
+            "update-failed" => UpdateStatus::Failed {
+                message: format!(
+                    "Zenless can't replace itself in {} (access denied). Download the new version from the website instead.",
+                    r"C:\Program Files\Zenless\Torrent"
+                ),
+                release: Some(release),
+            },
+            _ => return,
+        };
+        self.updater.set_status_for_demo(status);
+    }
+
+    /// "Restart now": installs the ready update and starts the new version.
+    /// Torrents keep their state: librqbit's session persistence brings the
+    /// running ones back running and the paused ones paused.
+    fn restart_for_update(&mut self, ctx: &egui::Context) {
+        if self.demo {
+            self.toast("Demo mode: updates aren't installed.", ToastKind::Info);
+            return;
+        }
+        let mut args = Vec::new();
+        if ctx.input(|i| i.viewport().minimized == Some(true)) {
+            args.push("--minimized".to_owned());
+        }
+        match self.updater.install_and_restart(&args) {
+            Ok(()) => {
+                self.restart_when_ready = false;
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
+            Err(e) => self.toast(format!("Couldn't install the update: {e}"), ToastKind::Error),
         }
     }
 
@@ -304,6 +399,7 @@ impl App {
             text: text.into(),
             kind,
             born: Instant::now(),
+            link: None,
         });
     }
 
@@ -952,7 +1048,7 @@ impl App {
                         if let Some(st) = &self.api_status {
                             let st = st.lock().unwrap_or_else(|e| e.into_inner()).clone();
                             let (c, t) = if st.listening {
-                                (p.text_dim, format!("{} API {}", icon::PLUGS_CONNECTED, api::PORT))
+                                (p.text_dim, format!("{} API {}", icon::PLUGS_CONNECTED, api::port()))
                             } else {
                                 (p.warning, format!("{} API off", icon::PLUGS))
                             };
@@ -1057,6 +1153,11 @@ impl eframe::App for App {
         self.poll_picker();
         self.open_next_add();
         self.sync_focus();
+        // Here and not in `ui()`: eframe only runs `logic()` while the window
+        // is minimized, and the test hook must work then too.
+        if self.restart_when_ready && matches!(self.updater.status(), UpdateStatus::Ready { .. }) {
+            self.restart_for_update(ctx);
+        }
         ctx.request_repaint_after(Duration::from_secs(1));
     }
 
@@ -1067,6 +1168,17 @@ impl eframe::App for App {
         let snap = self.snap.clone();
 
         self.toolbar(ui, &p);
+        if self.updater.banner_visible() {
+            let action = egui::Panel::top("update_banner")
+                .exact_size(Updater::BANNER_HEIGHT)
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| self.updater.banner_ui(ui, &p))
+                .inner;
+            if action == Some(UpdateAction::RestartNow) {
+                self.restart_for_update(&ctx);
+            }
+        }
         self.status_bar(ui, &p, &snap);
         self.sidebar(ui, &p, &snap);
         egui::CentralPanel::default()
@@ -1119,6 +1231,11 @@ impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_settings();
         self.engine.shutdown(Duration::from_secs(8));
+        // Settings and the session are saved: a downloaded update can replace
+        // the exe now, so the next start runs the new version.
+        if !self.demo {
+            self.updater.install_on_exit();
+        }
     }
 }
 

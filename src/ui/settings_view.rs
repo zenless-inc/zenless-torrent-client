@@ -6,6 +6,7 @@ use crate::platform;
 use crate::shared::{
     kit,
     theme::{Palette, mix},
+    updater::UpdateAction,
 };
 use eframe::egui::{self, RichText};
 use egui_phosphor::regular as icon;
@@ -325,7 +326,7 @@ impl App {
                     Some(s) if s.listening => (
                         icon::PLUGS_CONNECTED,
                         p.success,
-                        format!("Local API is listening on 127.0.0.1:{}", crate::api::PORT),
+                        format!("Local API is listening on 127.0.0.1:{}", crate::api::port()),
                     ),
                     Some(s) => (
                         icon::PLUGS,
@@ -403,6 +404,12 @@ impl App {
                 platform::open_folder(&crate::settings::data_dir());
             }
         });
+        ui.add_space(14.0);
+        kit::section_label(ui, p, "Updates");
+        if self.updater.settings_ui(ui, p) == Some(UpdateAction::RestartNow) {
+            let ctx = ui.ctx().clone();
+            self.restart_for_update(&ctx);
+        }
         ui.add_space(14.0);
         kit::section_label(ui, p, "Credits");
         hint(

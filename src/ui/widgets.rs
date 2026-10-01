@@ -156,10 +156,16 @@ pub struct Toast {
     pub text: String,
     pub kind: ToastKind,
     pub born: Instant,
+    /// Optional `(label, url)` link shown under the text (e.g. "What's new").
+    pub link: Option<(String, String)>,
 }
 
 impl Toast {
     fn lifetime(&self) -> Duration {
+        if self.link.is_some() {
+            // Leave time to click the link.
+            return Duration::from_secs(12);
+        }
         match self.kind {
             ToastKind::Error => Duration::from_secs(9),
             _ => Duration::from_secs(5),
@@ -201,7 +207,20 @@ pub fn show_toasts(ctx: &egui::Context, p: &Palette, toasts: &mut Vec<Toast>, bo
                     ui.set_max_width(360.0);
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(ic).size(18.0).color(color));
-                        ui.add(egui::Label::new(RichText::new(&t.text).color(p.text)).wrap());
+                        ui.vertical(|ui| {
+                            ui.add(egui::Label::new(RichText::new(&t.text).color(p.text)).wrap());
+                            if let Some((label, url)) = &t.link {
+                                let link = ui.add(
+                                    egui::Button::new(
+                                        RichText::new(format!("{label}  {}", icon::ARROW_SQUARE_OUT)).color(p.accent),
+                                    )
+                                    .frame(false),
+                                );
+                                if link.clicked() {
+                                    ctx.open_url(egui::OpenUrl::new_tab(url));
+                                }
+                            }
+                        });
                     });
                 })
         });
