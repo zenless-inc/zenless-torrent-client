@@ -33,7 +33,7 @@ Website: <https://zenless-suite.vercel.app> · Downloads: <https://zenless-suite
   "Make Zenless Torrent the default for magnet links and .torrent files" button, which writes the HKCU
   keys and has a shortcut to Windows' Default apps. The Network and Browser integration pages cover the
   API status, the last extension contact and install steps. Appearance comes from the shared Zenless
-  theme gallery (13 themes plus custom themes). There's also an About page.
+  theme gallery (34 themes plus custom themes). There's also an About page.
 - **Notifications:** a toast appears when a download completes, and the taskbar flashes when the window
   isn't focused.
 - **Single instance:** a second launch forwards its magnet or `.torrent` arguments to the running app and
@@ -73,7 +73,7 @@ Zenless Torrent listens on `http://127.0.0.1:6813` (loopback only):
 
 | Request | Result |
 |---|---|
-| `GET /ping` | `{"ok":true,"app":"zenless-torrent","name":"Zenless Torrent","version":"0.2.0"}` |
+| `GET /ping` | `{"ok":true,"app":"zenless-torrent","name":"Zenless Torrent","version":"0.2.2"}` |
 | `GET /status` | counts (`downloading`, `seeding`, `paused`, `total`), `download_speed`, `upload_speed`, `items` |
 | `POST /add` | exactly one of `magnet`, `torrent_url` (+ `cookies`, `referrer`, `user_agent`), `torrent_base64` (+ `name`), `path`; optional `source`, `mode` = `ask` (default: shows the Add dialog and brings the window forward) or `start` |
 | `POST /focus` | restore and focus the window |

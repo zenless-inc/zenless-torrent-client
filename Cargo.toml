@@ -1,6 +1,6 @@
 [package]
 name = "zenless-torrent"
-version = "0.2.0"
+version = "0.2.2"
 edition = "2024"
 description = "Zenless Torrent - a calm, fast BitTorrent client"
 license = "MIT"
