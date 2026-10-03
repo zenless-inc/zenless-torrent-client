@@ -29,7 +29,8 @@ Website: <https://zenless-suite.vercel.app> · Downloads: <https://zenless-suite
 - **Session persistence** in `%APPDATA%\Zenless\Torrent\session`: torrents come back after a restart,
   with fast resume. Also DHT, a configurable listen port (a busy port falls back to a random one), UPnP
   port forwarding, optional µTP, and download/upload speed limits applied live.
-- **Settings:** default folder, start with Windows, start minimized, completion notifications, and a
+- **Settings:** default folder, start with Windows, start minimized, completion notifications, the tray
+  icon and close-to-tray, and a
   "Make Zenless Torrent the default for magnet links and .torrent files" button, which writes the HKCU
   keys and has a shortcut to Windows' Default apps. The Network and Browser integration pages cover the
   API status, the last extension contact and install steps. Appearance comes from the shared Zenless
@@ -38,6 +39,8 @@ Website: <https://zenless-suite.vercel.app> · Downloads: <https://zenless-suite
   isn't focused.
 - **Single instance:** a second launch forwards its magnet or `.torrent` arguments to the running app and
   exits.
+- **System tray icon** with live speeds; closing the window keeps the app running there (see
+  [System tray](#system-tray)).
 - **Automatic updates** from the GitHub releases, checksum-verified (see [Updates](#updates)).
 
 ## Updates
@@ -67,13 +70,38 @@ The app updates itself from its [GitHub releases](https://github.com/zenless-inc
   and install on exit).
 - What the updater did is logged to `%APPDATA%\Zenless\Torrent\updates\updater.log`.
 
+## System tray
+
+While the app runs it shows an icon in the Windows notification area (Windows 11 may put new
+icons in the overflow menu behind the `^` arrow; drag it onto the taskbar to keep it visible).
+
+- **Tooltip** with the live speeds, refreshed every 2 seconds:
+  `Zenless Torrent · ↓ 3.1 MB/s ↑ 420 KB/s`, or `Zenless Torrent · idle`.
+- **Left click** shows the window (restored and focused) when it is hidden or minimized, and
+  hides it when it is on screen.
+- **Right-click menu:** *Show Zenless Torrent* / *Hide*, *Add magnet link…*, *Add .torrent
+  file…*, *Pause all*, *Resume all*, *Quit*.
+- **Closing the window** (title-bar X, Alt+F4) hides it to the tray while *Settings › General ›
+  Keep running in the tray when the window is closed* is on (the default). Downloading and
+  seeding go on; the first time, a Windows notification (and a note in the window once it's
+  opened again) says that the app is still running. *Quit* in the tray menu exits.
+- *Settings › General › Show an icon in the system tray* (on by default) removes the icon when
+  turned off; the close button then quits again.
+- `--minimized` (used by the sign-in autostart) starts hidden in the tray, or minimized to the
+  taskbar without the tray icon.
+- While the window is hidden, completed downloads are announced with a Windows notification
+  (when *Notify me when a download completes* is on).
+- Things that need the window bring it back from the tray: a magnet or `.torrent` sent from the
+  browser (`mode: ask`), `POST /focus`, opening a magnet link or `.torrent` file (single-instance
+  hand-off). `POST /quit`, *Quit* and *Restart now* after an update always exit.
+
 ## Local API (browser integration)
 
 Zenless Torrent listens on `http://127.0.0.1:6813` (loopback only):
 
 | Request | Result |
 |---|---|
-| `GET /ping` | `{"ok":true,"app":"zenless-torrent","name":"Zenless Torrent","version":"0.2.2"}` |
+| `GET /ping` | `{"ok":true,"app":"zenless-torrent","name":"Zenless Torrent","version":"0.2.3"}` |
 | `GET /status` | counts (`downloading`, `seeding`, `paused`, `total`), `download_speed`, `upload_speed`, `items` |
 | `POST /add` | exactly one of `magnet`, `torrent_url` (+ `cookies`, `referrer`, `user_agent`), `torrent_base64` (+ `name`), `path`; optional `source`, `mode` = `ask` (default: shows the Add dialog and brings the window forward) or `start` |
 | `POST /focus` | restore and focus the window |
@@ -99,6 +127,8 @@ curl -s -X POST http://127.0.0.1:6813/add -H "X-Zenless-Client: curl/1.0" \
 ```
 zenless-torrent.exe [--minimized] [magnet:?... | path\to\file.torrent ...]
 ```
+
+`--minimized` starts hidden in the tray (or minimized when the tray icon is turned off).
 
 After an update the previous version starts the new one with `--updated-from <old version>`; it
 first waits (at most 20 s) until the old instance stops answering `/ping`, then runs the usual

@@ -5,6 +5,7 @@ mod details;
 mod file_tree;
 mod settings_view;
 mod sidebar;
+mod systray;
 mod table;
 mod toolbar;
 mod widgets;
@@ -15,6 +16,7 @@ use crate::engine::{AddParams, Command, EngineConfig, EngineHandle};
 use crate::model::{AddSource, EngineEvent, Filter, Snapshot, TorrentView};
 use crate::settings::Settings;
 use crate::shared::updater::{ReleaseInfo, Status as UpdateStatus, UpdateAction, Updater, UpdaterConfig};
+use crate::shared::tray::{Tray, WindowState};
 use crate::shared::{kit, theme::ThemeManager};
 use add_dialog::{AddDialog, AddOutcome};
 use eframe::egui::{self, RichText, ViewportCommand};
@@ -114,6 +116,20 @@ pub struct App {
     /// `ZENLESS_UPDATE_TEST_RESTART=1`: restart as soon as an update is
     /// ready, exactly like "Restart now" (end-to-end tests).
     restart_when_ready: bool,
+
+    /// The system tray icon (see `systray.rs`); `None` when turned off.
+    tray: Option<Tray>,
+    /// No tray icon in screenshot mode (it would outlive the quick exit).
+    tray_allowed: bool,
+    /// Why the tray icon couldn't be created (shown in Settings).
+    tray_error: Option<String>,
+    tray_refreshed: Instant,
+    /// The first close to the tray happened: say so in the window once it's back.
+    tray_notice_pending: bool,
+    /// Shown / hidden in the tray.
+    win: WindowState,
+    /// Set by [`App::quit`]: the next close request really exits.
+    quitting: bool,
 }
 
 /// The updater settings for this app.
@@ -214,7 +230,17 @@ impl App {
             handlers_on: false,
             updater,
             restart_when_ready: !demo && std::env::var("ZENLESS_UPDATE_TEST_RESTART").is_ok_and(|v| v == "1"),
+            tray: None,
+            tray_allowed: std::env::var_os("ZENLESS_SCREENSHOT").is_none(),
+            tray_error: None,
+            tray_refreshed: Instant::now(),
+            tray_notice_pending: false,
+            win: WindowState::default(),
+            quitting: false,
         };
+        // The tray icon is created here, on the main thread, before the first
+        // frame (`--minimized` hides the window into it).
+        app.sync_tray(&ctx);
         if let Some(from) = &args.updated_from {
             let notes = app.updater.config().release_page(api::VERSION);
             app.toasts.push(Toast {
@@ -360,13 +386,14 @@ impl App {
             return;
         }
         let mut args = Vec::new();
-        if ctx.input(|i| i.viewport().minimized == Some(true)) {
+        if !self.win.on_screen(ctx) {
+            // Minimized or hidden in the tray: the new version starts the same way.
             args.push("--minimized".to_owned());
         }
         match self.updater.install_and_restart(&args) {
             Ok(()) => {
                 self.restart_when_ready = false;
-                ctx.send_viewport_cmd(ViewportCommand::Close);
+                self.quit(ctx);
             }
             Err(e) => self.toast(format!("Couldn't install the update: {e}"), ToastKind::Error),
         }
@@ -403,12 +430,12 @@ impl App {
         });
     }
 
-    /// Restores and raises the window (used for API `mode: ask` and `/focus`).
+    /// Shows (also out of the tray), restores and raises the window (API
+    /// `mode: ask` and `/focus`, the tray icon).
     fn raise_window(&mut self, ctx: &egui::Context) {
-        ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+        self.win.show(ctx);
+        // Briefly on top, in case Windows refuses to hand over the focus.
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
-        ctx.send_viewport_cmd(ViewportCommand::Focus);
         self.raise_frames = 6;
     }
 
@@ -680,8 +707,9 @@ impl App {
                 EngineEvent::Added { name } => self.toast(format!("Added \"{name}\""), ToastKind::Success),
                 EngineEvent::Completed { name } => {
                     if self.settings.notify_on_complete {
+                        self.tray_notify_completed(&name);
                         self.toast(format!("Download complete: {name}"), ToastKind::Success);
-                        if !ctx.input(|i| i.focused) {
+                        if !ctx.input(|i| i.focused) && !self.win.is_hidden() {
                             ctx.send_viewport_cmd(ViewportCommand::RequestUserAttention(
                                 egui::UserAttentionType::Informational,
                             ));
@@ -706,7 +734,7 @@ impl App {
                     self.queue_add(req.source, &req.client, req.mode);
                 }
                 ApiEvent::Focus => self.raise_window(ctx),
-                ApiEvent::Quit => ctx.send_viewport_cmd(ViewportCommand::Close),
+                ApiEvent::Quit => self.quit(ctx),
             }
         }
     }
@@ -1135,8 +1163,15 @@ impl eframe::App for App {
             self.themes.poll(ctx);
         }
         self.frames += 1;
-        if self.frames == 2 && self.start_minimized {
-            ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+        if self.start_minimized {
+            if self.tray.is_some() {
+                // `--minimized` (autostart) with the tray icon: start in the tray.
+                if self.frames == 1 {
+                    self.win.hide(ctx);
+                }
+            } else if self.frames == 2 {
+                ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+            }
         }
         if self.raise_frames > 0 {
             self.raise_frames -= 1;
@@ -1158,6 +1193,8 @@ impl eframe::App for App {
         if self.restart_when_ready && matches!(self.updater.status(), UpdateStatus::Ready { .. }) {
             self.restart_for_update(ctx);
         }
+        self.tray_tick(ctx);
+        self.handle_close_request(ctx);
         ctx.request_repaint_after(Duration::from_secs(1));
     }
 
@@ -1229,6 +1266,8 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Remove the tray icon right away, not after the engine has stopped.
+        self.tray = None;
         self.save_settings();
         self.engine.shutdown(Duration::from_secs(8));
         // Settings and the session are saved: a downloaded update can replace

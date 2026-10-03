@@ -6,6 +6,7 @@ use crate::platform;
 use crate::shared::{
     kit,
     theme::{Palette, mix},
+    tray,
     updater::UpdateAction,
 };
 use eframe::egui::{self, RichText};
@@ -145,6 +146,32 @@ impl App {
             .changed();
 
         ui.add_space(14.0);
+        kit::section_label(ui, p, "System tray");
+        changed |= ui
+            .add_enabled(
+                tray::supported(),
+                egui::Checkbox::new(&mut self.settings.tray_icon, "Show an icon in the system tray"),
+            )
+            .on_hover_text(
+                "Click the icon to show or hide the window. Right-click it to add torrents, pause or resume \
+                 everything, or quit.",
+            )
+            .changed();
+        ui.add_enabled_ui(tray::supported() && self.settings.tray_icon, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(24.0);
+                changed |= ui
+                    .checkbox(&mut self.settings.close_to_tray, "Keep running in the tray when the window is closed")
+                    .on_hover_text("Downloading and seeding continue in the background. Quit from the tray icon's menu.")
+                    .changed();
+            });
+        });
+        if let Some(e) = &self.tray_error {
+            let text = format!("{}  The tray icon couldn't be created: {e}", icon::WARNING_CIRCLE);
+            ui.label(RichText::new(text).color(p.danger));
+        }
+
+        ui.add_space(14.0);
         kit::section_label(ui, p, "Startup");
         let mut autostart = self.autostart_on;
         if ui.checkbox(&mut autostart, "Start Zenless Torrent when I sign in to Windows").changed() {
@@ -160,8 +187,13 @@ impl App {
                 Err(e) => self.toast(format!("Could not change autostart: {e}"), ToastKind::Error),
             }
         }
+        let minimized_label = if self.settings.tray_icon && tray::supported() {
+            "Start in the tray when launched at sign-in"
+        } else {
+            "Start minimized when launched at sign-in"
+        };
         if ui
-            .checkbox(&mut self.settings.start_minimized, "Start minimized when launched at sign-in")
+            .checkbox(&mut self.settings.start_minimized, minimized_label)
             .changed()
         {
             changed = true;

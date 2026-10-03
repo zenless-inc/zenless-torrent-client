@@ -52,6 +52,13 @@ pub struct Settings {
     /// Default of the "Start immediately" checkbox in the Add dialog.
     pub start_immediately: bool,
     pub notify_on_complete: bool,
+    /// Show an icon in the system tray (Windows).
+    pub tray_icon: bool,
+    /// Closing the window hides it to the tray instead of quitting. Only
+    /// applies while the tray icon is shown.
+    pub close_to_tray: bool,
+    /// The one-time "still running in the tray" notice was shown.
+    pub tray_hint_shown: bool,
     pub show_details: bool,
     pub sort_column: Column,
     pub sort_descending: bool,
@@ -71,6 +78,9 @@ impl Default for Settings {
             upload_limit_kib: 0,
             start_immediately: true,
             notify_on_complete: true,
+            tray_icon: true,
+            close_to_tray: true,
+            tray_hint_shown: false,
             show_details: true,
             sort_column: Column::Added,
             sort_descending: true,
@@ -188,6 +198,26 @@ mod tests {
 
         std::fs::write(&path, b"{ not json").unwrap();
         assert_eq!(Settings::load_from(&path), Settings::default());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn tray_settings() {
+        // Settings files from 0.2.x don't have the keys: tray icon and
+        // close-to-tray on, the one-time notice not shown yet.
+        let path = temp_file("tray");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"listen_port": 7000, "notify_on_complete": false}"#).unwrap();
+        let s = Settings::load_from(&path);
+        assert!(s.tray_icon);
+        assert!(s.close_to_tray);
+        assert!(!s.tray_hint_shown);
+        assert!(!s.notify_on_complete);
+        // Turned off / shown survives a save.
+        let s = Settings { tray_icon: false, close_to_tray: false, tray_hint_shown: true, ..s };
+        s.save_to(&path).unwrap();
+        let back = Settings::load_from(&path);
+        assert!(!back.tray_icon && !back.close_to_tray && back.tray_hint_shown);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
